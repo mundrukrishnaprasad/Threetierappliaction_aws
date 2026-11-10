@@ -1,128 +1,115 @@
-# Three Tier Architecture Deployment on AWS EKS
+# Three-Tier Microservices on AWS EKS
 
-Stan's Robot Shop is a sample microservice application you can use as a sandbox to test and learn containerised application orchestration and monitoring techniques. It is not intended to be a comprehensive reference example of how to write a microservices application, although you will better understand some of those concepts by playing with Stan's Robot Shop. To be clear, the error handling is patchy and there is not any security built into the application.
+A hands-on deployment lab built around **Stan's Robot Shop**, a polyglot microservices storefront. The repository captures the three-tier topology used for the exercise: a web front end, a set of application services, and a data tier with MongoDB, Redis, MySQL and RabbitMQ.
 
-You can get more detailed information from my [blog post](https://www.instana.com/blog/stans-robot-shop-sample-microservice-application/) about this sample microservice application.
+The goal is operational rather than product-focused: run the same stack locally with Docker Compose, then move it to a Kubernetes cluster on AWS EKS.
 
-This sample microservice application has been built using these technologies:
-- NodeJS ([Express](http://expressjs.com/))
-- Java ([Spring Boot](https://spring.io/))
-- Python ([Flask](http://flask.pocoo.org))
-- Golang
-- PHP (Apache)
-- MongoDB
-- Redis
-- MySQL ([Maxmind](http://www.maxmind.com) data)
-- RabbitMQ
-- Nginx
-- AngularJS (1.x)
+> **Local demo:** <http://localhost:8080> after `docker compose up --no-build`  
+> **Cloud target:** AWS EKS with images stored in Amazon ECR
 
-The various services in the sample application already include all required Instana components installed and configured. The Instana components provide automatic instrumentation for complete end to end [tracing](https://docs.instana.io/core_concepts/tracing/), as well as complete visibility into time series metrics for all the technologies.
+## Architecture
 
-To see the application performance results in the Instana dashboard, you will first need an Instana account. Don't worry a [trial account](https://instana.com/trial?utm_source=github&utm_medium=robot_shop) is free.
+```mermaid
+flowchart TB
+  U[Browser] --> W[Web<br/>AngularJS + Nginx]
 
-## Build from Source
-To optionally build from source (you will need a newish version of Docker to do this) use Docker Compose. Optionally edit the `.env` file to specify an alternative image registry and version tag; see the official [documentation](https://docs.docker.com/compose/env-file/) for more information.
+  subgraph App["Application tier"]
+    W --> C[Catalogue]
+    W --> US[User]
+    W --> CT[Cart]
+    W --> SH[Shipping]
+    W --> RT[Ratings]
+    W --> PM[Payment]
+    W --> DP[Dispatch]
+  end
 
-To download the tracing module for Nginx, it needs a valid Instana agent key. Set this in the environment before starting the build.
+  subgraph Data["Data tier"]
+    C --> M[(MongoDB)]
+    US --> M
+    US --> R[(Redis)]
+    CT --> R
+    SH --> M
+    RT --> M
+    PM --> MY[(MySQL)]
+    DP --> MQ[(RabbitMQ)]
+  end
 
-```shell
-$ export INSTANA_AGENT_KEY="<your agent key>"
+  subgraph Load["Load generation"]
+    L[Locust load generator] --> W
+  end
 ```
 
-Now build all the images.
+| Tier | Services | Responsibility |
+| --- | --- | --- |
+| Web | `web` | AngularJS storefront served by Nginx on port 8080 |
+| Application | `catalogue`, `user`, `cart`, `shipping`, `ratings`, `payment`, `dispatch` | Product, account, basket, fulfilment, reviews, checkout and order routing |
+| Data | `mongodb`, `redis`, `mysql`, `rabbitmq` | Catalogue and user documents, sessions and cart state, payment records, async order messages |
 
-```shell
-$ docker-compose build
+The services are written in Node.js, Java, Python, Go and PHP. This is a teaching application: error handling and security are intentionally thin, so do not treat it as a production reference.
+
+## What is in this repository
+
+| Path | Purpose |
+| --- | --- |
+| `docker-compose.yaml` | Full three-tier stack, networks, health checks and log limits |
+| `docker-compose-load.yaml` | Optional Locust load generator attached to the same network |
+| `.env` | Image registry and tag used by Compose (`robotshop`, `2.1.0`) |
+| `pullbaseimages.sh` | Pulls the base images referenced by any local Dockerfiles |
+| `LICENSE` | Apache 2.0 |
+
+The published service images live under the `robotshop` Docker Hub organisation. The upstream application source and its Kubernetes/Helm manifests are maintained in the [Stan's Robot Shop](https://github.com/instana/robot-shop) project; this repository keeps the Compose deployment layer used for the lab.
+
+## Run locally
+
+Requirements: Docker Desktop or Docker Engine with Compose v2.
+
+```bash
+docker compose pull
+docker compose up --no-build
 ```
 
-If you modified the `.env` file and changed the image registry, you need to push the images to that registry
+Open <http://localhost:8080>.
 
-```shell
-$ docker-compose push
+To include continuous load:
+
+```bash
+docker compose -f docker-compose.yaml -f docker-compose-load.yaml up --no-build
 ```
 
-## Run Locally
-You can run it locally for testing.
+Stop the stack:
 
-If you did not build from source, don't worry all the images are on Docker Hub. Just pull down those images first using:
-
-```shell
-$ docker-compose pull
+```bash
+docker compose down
 ```
 
-Fire up Stan's Robot Shop with:
+Check the running services:
 
-```shell
-$ docker-compose up
+```bash
+docker compose ps
+docker compose logs -f web
 ```
 
-If you want to fire up some load as well:
+## Deploy to AWS EKS
 
-```shell
-$ docker-compose -f docker-compose.yaml -f docker-compose-load.yaml up
-```
+The Compose stack maps directly to a Kubernetes deployment:
 
-If you are running it locally on a Linux host you can also run the Instana [agent](https://docs.instana.io/quick_start/agent_setup/container/docker/) locally, unfortunately the agent is currently not supported on Mac.
+1. **Images** — build or pull each service image and push it to Amazon ECR. Replace the `robotshop` registry in `.env` with your ECR repository prefix.
+2. **Cluster** — create an EKS cluster and configure `kubectl` for it.
+3. **Workloads** — create a namespace, then deploy each service as a Deployment and the storefront as a LoadBalancer Service. Add the data tier as StatefulSets or point the services at managed databases.
+4. **Configuration** — move connection strings and credentials into ConfigMaps and Secrets. Do not commit them.
+5. **Expose** — read the web Service's external hostname and open it in a browser.
+6. **Observe** — check pod status, Service endpoints and application logs before generating load.
 
-There is also only limited support on ARM architectures at the moment.
+The Compose file is the source of truth for service names, ports and data-store connections. Cluster manifests are intentionally not checked in here; add them under `k8s/` for a reproducible EKS deployment.
 
-## Marathon / DCOS
+## Load generation
 
-The manifests for robotshop are in the *DCOS/* directory. These manifests were built using a fresh install of DCOS 1.11.0. They should work on a vanilla HA or single instance install.
+`docker-compose-load.yaml` starts the Locust-based generator against `http://web:8080`. Use it to watch the stack under traffic while tuning resources or readiness probes.
 
-You may install Instana via the DCOS package manager, instructions are here: https://github.com/dcos/examples/tree/master/instana-agent/1.9
+## Credit
 
-## Kubernetes
-You can run Kubernetes locally using [minikube](https://github.com/kubernetes/minikube) or on one of the many cloud providers.
+The application is **Stan's Robot Shop**, published by Instana as a microservices and observability sandbox. See the [upstream project](https://github.com/instana/robot-shop) and the [original blog post](https://www.instana.com/blog/stans-robot-shop-sample-microservice-application/). This repository packages the deployment exercise around it.
 
-The Docker container images are all available on [Docker Hub](https://hub.docker.com/u/robotshop/).
+## License
 
-Install Stan's Robot Shop to your Kubernetes cluster using the [Helm](K8s/helm/README.md) chart.
-
-To deploy the Instana agent to Kubernetes, just use the [helm](https://github.com/instana/helm-charts) chart.
-
-## Accessing the Store
-If you are running the store locally via *docker-compose up* then, the store front is available on localhost port 8080 [http://localhost:8080](http://localhost:8080/)
-
-If you are running the store on Kubernetes via minikube then, find the IP address of Minikube and the Node Port of the web service.
-
-```shell
-$ minikube ip
-$ kubectl get svc web
-```
-
-If you are using a cloud Kubernetes / Openshift / Mesosphere then it will be available on the load balancer of that system.
-
-## Load Generation
-A separate load generation utility is provided in the `load-gen` directory. This is not automatically run when the application is started. The load generator is built with Python and [Locust](https://locust.io). The `build.sh` script builds the Docker image, optionally taking *push* as the first argument to also push the image to the registry. The registry and tag settings are loaded from the `.env` file in the parent directory. The script `load-gen.sh` runs the image, it takes a number of command line arguments. You could run the container inside an orchestration system (K8s) as well if you want to, an example descriptor is provided in K8s directory. For End-user Monitoring ,load is not automatically generated but by navigating through the Robotshop from the browser .For more details see the [README](load-gen/README.md) in the load-gen directory.  
-
-## Website Monitoring / End-User Monitoring
-
-### Docker Compose
-
-To enable Website Monioring / End-User Monitoring (EUM) see the official [documentation](https://docs.instana.io/website_monitoring/) for how to create a configuration. There is no need to inject the JavaScript fragment into the page, this will be handled automatically. Just make a note of the unique key and set the environment variable `INSTANA_EUM_KEY` and `INSTANA_EUM_REPORTING_URL` for the web image within `docker-compose.yaml`.
-
-### Kubernetes
-
-The Helm chart for installing Stan's Robot Shop supports setting the key and endpoint url required for website monitoring, see the [README](K8s/helm/README.md).
-
-## Prometheus
-
-The cart and payment services both have Prometheus metric endpoints. These are accessible on `/metrics`. The cart service provides:
-
-* Counter of the number of items added to the cart
-
-The payment services provides:
-
-* Counter of the number of items perchased
-* Histogram of the total number of items in each cart
-* Histogram of the total value of each cart
-
-To test the metrics use:
-
-```shell
-$ curl http://<host>:8080/api/cart/metrics
-$ curl http://<host>:8080/api/payment/metrics
-```
-
+Apache 2.0. See [LICENSE](LICENSE).
